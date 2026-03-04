@@ -1,0 +1,84 @@
+<!DOCTYPE HTML>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<html lang="zh-CN">
+<html>
+	<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=2.0, user-scalable=yes" />
+    <title>🐾 伴伴智宠 - 语音控制模式</title>
+		<style>
+body {
+    font-family: Arial, sans-serif;
+    background-color: #f0f0f0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    margin: 0;
+}
+.container {
+    text-align: center;
+    background: white;
+    padding: 40px;
+    border-radius: 10px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+h1 {
+    color: #333;
+    margin-bottom: 20px;
+}
+.status {
+    font-size: 24px;
+    color: #4CAF50;
+    margin: 20px 0;
+}
+button {
+    width: 200px;
+    height: 50px;
+    font-size: 16px;
+    background-color: #4CAF50;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    margin: 10px;
+}
+button:hover {
+    background-color: #45a049;
+}
+</style>
+<script language="javascript">
+// 页面加载时自动切换到语音模式
+window.onload = function() {
+    // 发送切换到语音模式的命令
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", "/?key=c2", true);
+    xhr.send();
+    
+    // 显示状态
+    document.getElementById('statusText').innerHTML = "✅ 已切换到语音控制模式";
+};
+
+// 返回Web控制模式
+function returnToWebMode() {
+    if(confirm("确定要返回Web控制模式吗？")) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", "/?key=c0", true);
+        xhr.send();
+        
+        // 跳转回控制页面
+        setTimeout(function() {
+            window.location.href = "control.html";
+        }, 500);
+    }
+}
+</script>
+	</head>
+	<body>
+		<div class="container">
+			<h1>🐾 伴伴智宠</h1>
+			<div class="status" id="statusText">正在切换到语音控制模式...</div>
+			<p>当前为语音控制模式，请使用语音指令进行控制</p>
+			<button onclick="returnToWebMode()">返回Web控制模式</button>
+		</div>
+	</body>
+</html>
