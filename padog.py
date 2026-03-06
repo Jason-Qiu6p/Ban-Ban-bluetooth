@@ -281,6 +281,7 @@ act_tran_mov_kp=tran_mov_kp
 timed_action_end_time = 0
 timed_action_running = False
 current_pose = 'stand'
+has_printed_initial_voltage = False  # 新增：用于确保电压仅在上电时显示一次
 
 def mechan_offset_corr(x):
   p1=0.006649; p2=0.4414; p3=5.53
@@ -967,18 +968,19 @@ def support_curve_generate(t,Tf,x_past,t_past,zf):
   return xf,zf
   
 def alarm_and_servo_control():
-  global normal_node,error_node,empty_power_count
+  global normal_node,error_node,empty_power_count, has_printed_initial_voltage
   judge_num_node=0
   
   # 读取电压并计算
   val = adc.read()
   voltage = read_voltage(val)
   
-  # 低压检测 (打印调试信息)
-  if empty_power_count == 0 or empty_power_count % 50 == 0:
-      print(f"V: {voltage:.2f}V, Raw: {val}") # 调试时去掉注释
-      pass
+  # 仅在上电时打印一次电压信息，防止刷屏
+  if not has_printed_initial_voltage:
+      print(f"系统启动 - 当前电池电压: {voltage:.2f}V (Raw: {val})")
+      has_printed_initial_voltage = True
 
+  # 低压检测
   if voltage < 5.5 and voltage > 0.8:  
     empty_power_count+=1
   else:
@@ -1090,14 +1092,3 @@ def mainloop():
     print("Mainloop IK Error")
 print("伴伴智宠 - Ban-Ban Dog")
 print("版本：V2.0")
-
-
-
-
-
-
-
-
-
-
-
