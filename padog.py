@@ -355,6 +355,7 @@ def action_lock(func):
             print(func.__name__, "动作错误:", str(e))
         finally:
             stand_pose()
+            stop_run_node = 0
     return wrapper
 
 def smooth_transition(target_positions, steps=25, delay=0.04, velocity_profile='s-curve'):
