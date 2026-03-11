@@ -9,15 +9,15 @@ release()
 freq(240000000)
 
 # ================= 启动模式选择 =================
-boot_btn = Pin(0, Pin.IN, Pin.PULL_UP)
-#led = Pin(22, Pin.OUT) # 板载 LED 是 GPIO 22
+boot_btn = Pin(12, Pin.IN, Pin.PULL_UP) # 修改为短接地和IO12，用与分体运动板
+led = Pin(22, Pin.OUT) # 板载 LED 是 GPIO 22
 
 print("等待启动模式选择 (3秒)...")
 mode_debug = False
 
 # 闪烁 LED 提示用户可以按键
 for i in range(6): 
-    #led.value(not led.value())
+    led.value(not led.value())
     if boot_btn.value() == 0: # 按下为低电平
         mode_debug = True
         print("检测到按键 -> 进入 WiFi 调试模式")
@@ -26,7 +26,7 @@ for i in range(6):
         padog.alarm(0,0,0)
         break
     time.sleep(0.3)
-#led.value(1) # 常亮表示启动完成
+led.value(1) # 常亮表示启动完成
 
 # ================= 主循环逻辑 =================
 t = Timer(1)

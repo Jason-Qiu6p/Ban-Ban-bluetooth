@@ -124,6 +124,7 @@ def handle_action(action):
     elif action == "stretch": stretch()
     elif action == "push_up": push_up()
     elif action == "shake_body": shake_body()
+    elif action == "greet": greet_action()
     elif action == "gait_trot": gait(0)
     elif action == "gait_walk": gait(1)
     elif action == "stable_on": stable(True)
@@ -281,6 +282,7 @@ act_tran_mov_kp=tran_mov_kp
 timed_action_end_time = 0
 timed_action_running = False
 current_pose = 'stand'
+last_servo_positions = None  # 追踪最后一次舵机输出的8个角度，用于平滑过渡
 has_printed_initial_voltage = False  # 新增：用于确保电压仅在上电时显示一次
 
 def mechan_offset_corr(x):
@@ -291,6 +293,7 @@ def read_voltage(x):
     return 0.01235 * x
 
 def servo_output(case,init,ham1,ham2,ham3,ham4,shank1,shank2,shank3,shank4):
+  global last_servo_positions
   if case==0 and init==0:
     PA_SERVO.angle(2, init_1h+90-ham1)
     PA_SERVO.angle(3, (init_1s-90)+mechan_offset_corr(shank1))
@@ -300,6 +303,8 @@ def servo_output(case,init,ham1,ham2,ham3,ham4,shank1,shank2,shank3,shank4):
     PA_SERVO.angle(11, (init_3s+90)-mechan_offset_corr(shank3))
     PA_SERVO.angle(5, init_4h+90-ham4)
     PA_SERVO.angle(4, (init_4s-90)+mechan_offset_corr(shank4))
+    # 记录最后输出的角度，供 smooth_transition 读取起始位
+    last_servo_positions = [ham1, ham2, ham3, ham4, shank1, shank2, shank3, shank4]
   else:
     PA_SERVO.angle(2, init_1h); PA_SERVO.angle(3, init_1s)
     PA_SERVO.angle(13, init_2h); PA_SERVO.angle(12, init_2s)
@@ -326,9 +331,34 @@ def stable(key):
 def servo_init(key): global init_case; init_case=key
 def gait(mode): global gait_mode; gait_mode=mode
 
-#======V1.4 动作控制函数 (S曲线)======
+#======V1.4 动作控制函数======
+
+def s_curve(t):
+    """公共 S 曲线插值函数，t 范围 [0, 1]，返回 [0, 1]"""
+    if t <= 0: return 0.0
+    if t >= 1: return 1.0
+    return 6*t**5 - 15*t**4 + 10*t**3
+
+def _relock():
+    """重新锁定 mainloop（在动作内部调用 stand_pose 等姿态函数后使用）"""
+    global stop_run_node
+    stop_run_node = 1
+
+def action_lock(func):
+    """装饰器：自动管理 stop_run_node 锁定/解锁和异常处理"""
+    def wrapper(*args, **kwargs):
+        global stop_run_node
+        stop_run_node = 1
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            print(func.__name__, "动作错误:", str(e))
+        finally:
+            stand_pose()
+    return wrapper
+
 def smooth_transition(target_positions, steps=25, delay=0.04, velocity_profile='s-curve'):
-    """平滑过渡函数：从当前姿态平滑过渡到目标姿态
+    """平滑过渡函数：从当前姿态(last_servo_positions)平滑过渡到目标姿态
 
     参数:
         target_positions: 目标位置列表(8个舵机角度)
@@ -337,105 +367,38 @@ def smooth_transition(target_positions, steps=25, delay=0.04, velocity_profile='
         velocity_profile: 速度曲线类型('linear', 's-curve', 'trapezoidal')
     """
     try:
-        # 根据当前姿态获取起始位置
-        if current_pose == 'stand':
-            P_G_current = PA_ATTITUDE.cal_ges(PIT_S, ROL_S, l, b, w, X_S, R_H)
-            start_positions = PA_IK.ik(ma_case, l1, l2,
-                                     P_G_current[0], P_G_current[1], P_G_current[2], P_G_current[3],
-                                     P_G_current[4], P_G_current[5], P_G_current[6], P_G_current[7])
-        elif current_pose == 'sit':
-            P_G_current = PA_ATTITUDE.cal_ges(PIT_S, ROL_S, l, b, w, X_S, R_H)
-            sit_height_ratio = (R_H - 90) / (110 - 90) if R_H > 90 else 0  # 0=完全趴下，1=完全站立
-            front_leg_height = 90 + sit_height_ratio * 20  # 前腿高度在90-110之间
-            rear_leg_height = 90 + sit_height_ratio * 0   # 后腿保持90mm
-            start_positions = PA_IK.ik(ma_case, l1, l2,
-                                     P_G_current[0], P_G_current[1], P_G_current[2], P_G_current[3],
-                                     -front_leg_height, -front_leg_height, -rear_leg_height, -rear_leg_height)
-
-        elif current_pose == 'lie':
-            P_G_current = PA_ATTITUDE.cal_ges(PIT_S, ROL_S, l, b, w, X_S, R_H)
-            lie_height = 90 + (R_H - 90) * 0.2  # 在当前高度基础上稍微调整
-            start_positions = PA_IK.ik(ma_case, l1, l2,
-                                     P_G_current[0], P_G_current[1], P_G_current[2], P_G_current[3],
-                                     -lie_height, -lie_height, -lie_height, -lie_height)
+        # 使用 last_servo_positions 获取起始位置（由 servo_output 自动记录）
+        if last_servo_positions is not None:
+            start_positions = list(last_servo_positions)
         else:
-            # 默认站立姿态
-            print("起始位置：默认站立姿态")
-            start_positions = PA_IK.ik(ma_case, l1, l2, X_S, X_S, X_S, X_S, -110, -110, -110, -110)
+            # 首次调用，计算默认站立位
+            P_G = PA_ATTITUDE.cal_ges(0, 0, l, b, w, X_S, 110)
+            start_positions = PA_IK.ik(ma_case, l1, l2,
+                                       P_G[0], P_G[1], P_G[2], P_G[3],
+                                       P_G[4], P_G[5], P_G[6], P_G[7])
 
-        # S曲线速度控制函数
-        def s_curve_interpolation(t, total_steps):
-            """S曲线插值：提供平滑的加速和减速"""
-            # 将步数映射到0-1范围
-            x = t / total_steps
-
-            if x <= 0:
-                return 0.0
-            elif x >= 1:
-                return 1.0
-            else:
-                return 6*x**5 - 15*x**4 + 10*x**3
-
-        # 梯形速度控制函数
-        def trapezoidal_interpolation(t, total_steps):
-            """梯形速度控制：加速-匀速-减速"""
-            # 加速和减速阶段各占20%的步数
-            accel_steps = int(total_steps * 0.2)
-            decel_steps = int(total_steps * 0.2)
-            constant_steps = total_steps - accel_steps - decel_steps
-
-            if t < accel_steps:
-                # 加速阶段：二次函数
-                accel_ratio = t / accel_steps
-                return 0.5 * accel_ratio * accel_ratio
-            elif t < accel_steps + constant_steps:
-                # 匀速阶段
-                return 0.5 + (t - accel_steps) / constant_steps * 0.5
-            else:
-                # 减速阶段
-                decel_ratio = (total_steps - t) / decel_steps
-                return 1.0 - 0.5 * decel_ratio * decel_ratio
-
-        # 线性插值函数
-        def linear_interpolation(t, total_steps):
-            """线性插值"""
-            return t / total_steps
-
-        # 选择插值方法
+        # 选择插值方法（统一使用模块级 s_curve）
         if velocity_profile == 's-curve':
-            interpolation_func = s_curve_interpolation
+            interp = s_curve
         elif velocity_profile == 'trapezoidal':
-            interpolation_func = trapezoidal_interpolation
+            def interp(x):
+                if x < 0.2: return 2.5 * x * x
+                elif x < 0.8: return 0.1 + (x - 0.2) * (4.0/3.0)
+                else: return 1.0 - 2.5 * (1.0 - x) * (1.0 - x)
         else:
-            interpolation_func = linear_interpolation
+            def interp(x): return x
 
         # 执行平滑过渡
         for step in range(steps + 1):
-            # 使用选择的插值方法计算比例
-            ratio = interpolation_func(step, steps)
+            ratio = interp(step / steps)
 
-            # 计算中间位置
-            intermediate_positions = []
-            for i in range(8):
-                intermediate_positions.append(
-                    start_positions[i] + (target_positions[i] - start_positions[i]) * ratio
-                )
-
-            # 应用中间位置
-            servo_output(ma_case, 0,
-                        intermediate_positions[0], intermediate_positions[1],
-                        intermediate_positions[2], intermediate_positions[3],
-                        intermediate_positions[4], intermediate_positions[5],
-                        intermediate_positions[6], intermediate_positions[7])
-
+            # 计算并应用中间位置
+            pos = [start_positions[i] + (target_positions[i] - start_positions[i]) * ratio for i in range(8)]
+            servo_output(ma_case, 0, pos[0], pos[1], pos[2], pos[3], pos[4], pos[5], pos[6], pos[7])
             time.sleep(delay)
-
-        # print("平滑过渡完成") # 减少打印
 
     except Exception as e:
         print("平滑过渡错误:", str(e))
-
-        print("应用目标位置作为回退方案")
         servo_output(ma_case, 0,
                     target_positions[0], target_positions[1],
                     target_positions[2], target_positions[3],
@@ -446,6 +409,7 @@ def smooth_transition(target_positions, steps=25, delay=0.04, velocity_profile='
 def stand_pose():
     """站立姿态：所有腿高度110mm，并使用当前的重心偏移"""
     global H_goal, PIT_goal, ROL_goal, X_goal, current_pose, stop_run_node
+    was_locked = (stop_run_node == 1)  # 检查是否已被 @action_lock 锁定
     stop_run_node = 1 # 锁定mainloop
     try:
 
@@ -454,7 +418,7 @@ def stand_pose():
         H_goal = 110
         PIT_goal = PIT_S * 0.3  
         ROL_goal = ROL_S * 0.3
-        X_goal = X_S # 确保目标重心与当前重心一致
+        X_goal = X_S
 
         P_G = PA_ATTITUDE.cal_ges(PIT_goal, ROL_goal, l, b, w, X_goal, H_goal)
 
@@ -465,55 +429,57 @@ def stand_pose():
         smooth_transition(stand_positions, steps=20, delay=0.035, velocity_profile='s-curve')
 
         current_pose = 'stand'
-        PIT_goal = 0  # 完全过渡到目标姿态
+        PIT_goal = 0
         ROL_goal = 0
 
-        time.sleep(0.2)  # 缩短等待时间减少抖动
+        time.sleep(0.2)
     except Exception as e:
         print("站立姿态逆解算错误:", str(e))
     finally:
-        stop_run_node = 0 # 解锁mainloop
+        if not was_locked:
+            stop_run_node = 0 # 仅在非嵌套调用时解锁
 
 
 def sit_pose():
-    """坐下姿态：前腿110mm，后腿90mm（增加了5mm）"""
+    """坐下姿态：前腿110mm，后腿90mm"""
     global current_pose, stop_run_node, H_goal, PIT_goal, ROL_goal, X_goal
-    stop_run_node = 1 # 锁定mainloop
+    was_locked = (stop_run_node == 1)
+    stop_run_node = 1
     try:
-        # 保存当前姿态，用于过渡计算
         original_pose = current_pose
 
-        H_goal = 110  # 前腿高度保持110mm
-        PIT_goal = PIT_S * 0.2  # 逐渐调整到目标姿态
+        H_goal = 110
+        PIT_goal = PIT_S * 0.2
         ROL_goal = ROL_S * 0.2
-        X_goal = X_S  # 保持当前重心
+        X_goal = X_S
 
         P_G_sit = PA_ATTITUDE.cal_ges(PIT_goal, ROL_goal, l, b, w, X_goal, H_goal)
 
         sit_positions = PA_IK.ik(ma_case, l1, l2,
                                P_G_sit[0], P_G_sit[1], P_G_sit[2], P_G_sit[3],
-                               -110, -110, -90, -90)  # 前腿110mm，后腿90mm
+                               -110, -110, -90, -90)
 
         smooth_transition(sit_positions, steps=18, delay=0.03, velocity_profile='s-curve')
 
         current_pose = 'sit'
-        H_goal = 90  # 更新目标高度为后腿高度
-        PIT_goal = 0  # 完全过渡到目标姿态
+        H_goal = 90
+        PIT_goal = 0
         ROL_goal = 0
 
-        time.sleep(0.15)  # 缩短等待时间减少抖动
+        time.sleep(0.15)
     except Exception as e:
         print("坐下姿态逆解算错误:", str(e))
     finally:
-        stop_run_node = 0 # 解锁mainloop
+        if not was_locked:
+            stop_run_node = 0
 
 
 def lie_pose():
-    """趴下姿态：所有腿高度90mm（增加了5mm）"""
+    """趴下姿态：所有腿高度90mm"""
     global current_pose, stop_run_node, H_goal, PIT_goal, ROL_goal, X_goal
-    stop_run_node = 1 # 锁定mainloop
+    was_locked = (stop_run_node == 1)
+    stop_run_node = 1
     try:
-        # 保存当前姿态，用于过渡计算
         original_pose = current_pose
 
         H_goal = 90   
@@ -525,25 +491,24 @@ def lie_pose():
 
         lie_positions = PA_IK.ik(ma_case, l1, l2,
                                P_G_lie[0], P_G_lie[1], P_G_lie[2], P_G_lie[3],
-                               -90, -90, -90, -90)  # 所有腿高度90mm
+                               -90, -90, -90, -90)
 
         smooth_transition(lie_positions, steps=15, delay=0.025, velocity_profile='s-curve')
 
         current_pose = 'lie'
-        PIT_goal = 0  # 完全过渡到目标姿态
+        PIT_goal = 0
         ROL_goal = 0
 
-        time.sleep(0.1)  # 最短等待时间
+        time.sleep(0.1)
     except Exception as e:
         print("趴下姿态逆解算错误:", str(e))
     finally:
-        stop_run_node = 0 # 解锁mainloop
+        if not was_locked:
+            stop_run_node = 0
 
+@action_lock
 def greet_action():
     """(优化版)打招呼动作：平滑过渡，并带有身体协同"""
-    global stop_run_node
-    stop_run_node = 1 # 锁定mainloop，防止被打断
-
     # --- 动作参数 ---
     transition_steps = 20  # 姿态过渡的平滑步数
     wave_cycles = 3        # 挥手次数
@@ -552,96 +517,71 @@ def greet_action():
     greet_leg_forward = 50 # 打招呼腿向前伸出的距离
 
     stand_pos_y = [-110, -110, -110, -110]
+    greet_pos_y = [-110, -50, -90, -90]
 
-    greet_pos_y = [-110, -145, -90, -90]  # 后蹲高度从-85改为-90
+    # 1. 停止当前运动
+    m(0, 0, 0)
+    time.sleep(0.2)
+    
+    stand_pose()
+    time.sleep(0.1)
 
-    try:
-        # 1. 停止当前运动
-        m(0, 0, 0)
-        time.sleep(0.2)
+    # 2. 从"站立"平滑过渡到"准备打招呼"，使用S曲线速度控制
+    print("过渡到打招呼姿态...")
+
+    for i in range(1, transition_steps + 1):
+        ratio = s_curve(i / transition_steps)  # 使用公共 s_curve
+
+        # 计算当前步骤的中间Y坐标
+        current_y = [
+            stand_pos_y[j] + (greet_pos_y[j] - stand_pos_y[j]) * ratio for j in range(4)
+        ]
+        # 身体稍微后仰，为前腿抬起做准备
+        current_pitch = -3 * ratio
         
-        stand_pose()
-        stop_run_node = 1 # stand_pose 会解锁，重新锁定
-        time.sleep(0.1)
+        # 计算X坐标：支撑腿保持在X_S，招呼腿向前伸出
+        leg_x = [X_S, X_S + greet_leg_forward * ratio, X_S, X_S]
+        
+        P_G = PA_ATTITUDE.cal_ges(current_pitch, 0, l, b, w, X_S, R_H)
 
-        # 2. 从"站立"平滑过渡到"准备打招呼"，使用S曲线速度控制
-        print("过渡到打招呼姿态...")
+        positions = PA_IK.ik(ma_case, l1, l2, 
+                           leg_x[0] + P_G[0], leg_x[1] + P_G[1], 
+                           leg_x[2] + P_G[2], leg_x[3] + P_G[3],
+                           current_y[0] + (P_G[4] + 110),
+                           current_y[1] + (P_G[5] + 110),
+                           current_y[2] + (P_G[6] + 110),
+                           current_y[3] + (P_G[7] + 110))
+                           
+        servo_output(ma_case, 0,
+                    positions[0], positions[1], positions[2], positions[3],
+                    positions[4], positions[5], positions[6], positions[7])
+        time.sleep(0.03)
 
-        # S曲线插值函数
-        def s_curve_interpolation(x):
-            if x <= 0:
-                return 0.0
-            elif x >= 1:
-                return 1.0
-            else:
-                return 6*x**5 - 15*x**4 + 10*x**3
-
-        for i in range(transition_steps + 1):
-            # 使用S曲线插值代替线性插值
-            linear_ratio = i / transition_steps
-            ratio = s_curve_interpolation(linear_ratio)
-
-            # 计算当前步骤的中间Y坐标
-            current_y = [
-                stand_pos_y[j] + (greet_pos_y[j] - stand_pos_y[j]) * ratio for j in range(4)
-            ]
-            # 身体稍微后仰，为前腿抬起做准备
-            current_pitch = -3 * ratio
+    # 3. 挥手并伴随身体侧倾
+    print("开始挥手...")
+    for _ in range(wave_cycles):
+        for i in range(60):
+            angle = i * (pi / 30)
+            wave_x = greet_leg_forward + 20 * sin(angle)
+            body_roll = body_roll_angle * sin(angle)
+            leg_x = [X_S, X_S + wave_x, X_S, X_S]
             
-            # 计算X坐标：支撑腿保持在X_S，招呼腿向前伸出
-            leg_x = [X_S, X_S + greet_leg_forward * ratio, X_S, X_S]
-            
-            # (注意：greet_action 绕过了 mainloop，因此必须自己计算姿态)
-            P_G = PA_ATTITUDE.cal_ges(current_pitch, 0, l, b, w, X_S, R_H)
+            P_G = PA_ATTITUDE.cal_ges(current_pitch, body_roll, l, b, w, X_S, R_H)
 
             positions = PA_IK.ik(ma_case, l1, l2, 
                                leg_x[0] + P_G[0], leg_x[1] + P_G[1], 
                                leg_x[2] + P_G[2], leg_x[3] + P_G[3],
-                               current_y[0] + (P_G[4] + 110), # P_G[4]是y的偏移量
-                               current_y[1] + (P_G[5] + 110),
-                               current_y[2] + (P_G[6] + 110),
-                               current_y[3] + (P_G[7] + 110))
+                               greet_pos_y[0] + (P_G[4] + 110),
+                               greet_pos_y[1] + (P_G[5] + 110),
+                               greet_pos_y[2] + (P_G[6] + 110),
+                               greet_pos_y[3] + (P_G[7] + 110))
                                
             servo_output(ma_case, 0,
-                        positions[0], positions[1], positions[2], positions[3],
-                        positions[4], positions[5], positions[6], positions[7])
-            time.sleep(0.03)
+                    positions[0], positions[1], positions[2], positions[3],
+                    positions[4], positions[5], positions[6], positions[7])
+            time.sleep(wave_speed_delay)
 
-        # 3. 挥手并伴随身体侧倾
-        print("开始挥手...")
-        for _ in range(wave_cycles):
-            for i in range(60): # 一个完整的sin周期分为60步
-                angle = i * (pi / 30) # 2*pi / 60
-
-                wave_x = greet_leg_forward + 20 * sin(angle)
-
-                body_roll = body_roll_angle * sin(angle)
-
-                leg_x = [X_S, X_S + wave_x, X_S, X_S]
-                
-                P_G = PA_ATTITUDE.cal_ges(current_pitch, body_roll, l, b, w, X_S, R_H)
-
-                positions = PA_IK.ik(ma_case, l1, l2, 
-                                   leg_x[0] + P_G[0], leg_x[1] + P_G[1], 
-                                   leg_x[2] + P_G[2], leg_x[3] + P_G[3],
-                                   greet_pos_y[0] + (P_G[4] + 110),
-                                   greet_pos_y[1] + (P_G[5] + 110),
-                                   greet_pos_y[2] + (P_G[6] + 110),
-                                   greet_pos_y[3] + (P_G[7] + 110))
-                                   
-                servo_output(ma_case, 0,
-                        positions[0], positions[1], positions[2], positions[3],
-                        positions[4], positions[5], positions[6], positions[7])
-
-                time.sleep(wave_speed_delay)
-
-        print("恢复站立姿态...")
-
-
-    except Exception as e:
-        print("打招呼动作错误:", str(e))
-    finally:
-        stand_pose() # stand_pose内部已经包含了锁定和解锁
+    print("恢复站立姿态...")
 
 def forward_3s_action():
     """前进3秒：以速度3前进3秒后自动停止"""
@@ -709,223 +649,174 @@ def right_3s_action():
 
 #======V1.4 新增及优化的动作函数======
 
+@action_lock
 def dance():
-    """(优化版) 波浪舞蹈：四条腿依次起伏形成平滑波浪效果"""
-    global stop_run_node
-    stop_run_node = 1 # 锁定mainloop
-    try:
-        # 停止当前运动
-        m(0, 0, 0)
+    """(优化版) 波浪舞蹈：带渐入渐出缓冲，四条腿依次起伏形成平滑波浪效果"""
+    # 停止当前运动
+    m(0, 0, 0)
 
-        # --- 波浪舞蹈参数 (优化) ---
-        wave_height = 12       # 波浪高度 (mm)
-        wave_cycles = 4        # 完整波浪循环次数
-        steps_per_cycle = 100   # 提高平滑度：一个周期(2*pi)的步数 (原为 40)
-        delay_per_step = 0.02  # 降低延迟，匹配步数 (原为 0.05)
-        # ---
+    # --- 波浪舞蹈参数 ---
+    wave_height = 12       # 波浪高度 (mm)
+    wave_cycles = 4        # 完整波浪循环次数
+    steps_per_cycle = 100  # 一个周期(2*pi)的步数
+    delay_per_step = 0.02  # 每步延迟
+    fade_steps = 30        # 渐入/渐出步数
+    # ---
 
-        # 初始站立姿态 (S曲线过渡)
-        stand_pose()
-        stop_run_node = 1 # stand_pose 会解锁，重新锁定
-        time.sleep(0.3) # 等待站立稳定
+    # 初始站立姿态（stand_pose 现在不会解锁 stop_run_node，因为 @action_lock 已锁定）
+    stand_pose()
+    time.sleep(0.1)
+    
+    # 精确过渡到舞蹈起始帧（pitch=0, roll=0, height=110）
+    P_G_start = PA_ATTITUDE.cal_ges(0, 0, l, b, w, X_S, 110)
+    start_dance_positions = PA_IK.ik(ma_case, l1, l2,
+                                     P_G_start[0], P_G_start[1], P_G_start[2], P_G_start[3],
+                                     P_G_start[4], P_G_start[5], P_G_start[6], P_G_start[7])
+    smooth_transition(start_dance_positions, steps=10, delay=0.02)
 
-        print("开始舞蹈...")
-        for cycle in range(wave_cycles):
-            for step in range(steps_per_cycle):
-                # phase 范围 [0, 2*pi]
-                phase = step * 2 * pi / steps_per_cycle
+    # 内部函数：计算单帧舞蹈姿态并输出
+    def _dance_frame(phase, cycle_idx, wh):
+        leg1_h = -110 + wh * sin(phase)
+        leg2_h = -110 + wh * sin(phase + pi/2)
+        leg3_h = -110 + wh * sin(phase + pi)
+        leg4_h = -110 + wh * sin(phase + 3*pi/2)
+        # 身体姿态协同，幅度随 wh 缩放
+        scale = wh / wave_height if wave_height > 0 else 0
+        pitch_angle = 5 * sin(cycle_idx * 2 * pi / wave_cycles + phase) * (1 - abs(cos(phase))) * scale
+        roll_angle = 3 * cos(phase) * scale
+        P_G = PA_ATTITUDE.cal_ges(pitch_angle, roll_angle, l, b, w, X_S, 110)
+        positions = PA_IK.ik(ma_case, l1, l2,
+                           P_G[0], P_G[1], P_G[2], P_G[3],
+                           P_G[4] + (leg1_h + 110),
+                           P_G[5] + (leg2_h + 110),
+                           P_G[6] + (leg3_h + 110),
+                           P_G[7] + (leg4_h + 110))
+        servo_output(ma_case, 0,
+                    positions[0], positions[1], positions[2], positions[3],
+                    positions[4], positions[5], positions[6], positions[7])
 
-                # 四条腿的相位差为 pi/2 (90度)，形成波浪
-                leg1_h = -110 + wave_height * sin(phase)
-                leg2_h = -110 + wave_height * sin(phase + pi/2)
-                leg3_h = -110 + wave_height * sin(phase + pi)
-                leg4_h = -110 + wave_height * sin(phase + 3*pi/2)
+    print("开始舞蹈...")
 
-                # 身体姿态协同 (保持原有的复杂摆动逻辑)
-                pitch_angle = 5 * sin(cycle * 2 * pi / wave_cycles + phase) * (1 - abs(cos(phase)))
-                roll_angle = 3 * cos(phase)
+    total_fade  = fade_steps                        # 渐入帧数
+    total_main  = wave_cycles * steps_per_cycle     # 主循环帧数
+    total_fade2 = fade_steps                        # 渐出帧数
+    total_steps = total_fade + total_main + total_fade2
 
-                # 1. 姿态解算
-                P_G = PA_ATTITUDE.cal_ges(pitch_angle, roll_angle, l, b, w, X_S, 110)
+    for global_step in range(total_steps):
+        # phase 全程单调递增，保证 sin 连续
+        phase = global_step * 2 * pi / steps_per_cycle
 
+        if global_step < total_fade:
+            # 渐入：幅度从 0 → wave_height
+            wh = wave_height * s_curve(global_step / total_fade)
+            cycle_idx = 0
+        elif global_step < total_fade + total_main:
+            # 正常舞蹈
+            wh = wave_height
+            cycle_idx = (global_step - total_fade) // steps_per_cycle
+        else:
+            # 渐出：幅度从 wave_height → 0
+            fade_pos = global_step - total_fade - total_main
+            wh = wave_height * s_curve(1.0 - fade_pos / total_fade2)
+            cycle_idx = wave_cycles - 1
 
-                # 2. 逆运动学解算 (结合姿态和腿部高度)
-                positions = PA_IK.ik(ma_case, l1, l2,
+        _dance_frame(phase, cycle_idx, wh)
+        time.sleep(delay_per_step)
 
-                                   P_G[0], P_G[1], P_G[2], P_G[3],
-                                   P_G[4] + (leg1_h + 110), 
-                                   P_G[5] + (leg2_h + 110),
-                                   P_G[6] + (leg3_h + 110),
-                                   P_G[7] + (leg4_h + 110))
+    print("舞蹈结束，恢复站立。")
 
-                # 3. 输出舵机
-                servo_output(ma_case, 0,
-                            positions[0], positions[1], positions[2], positions[3],
-                            positions[4], positions[5], positions[6], positions[7])
-
-                time.sleep(delay_per_step) # 使用优化后的延迟
-
-    except Exception as e:
-        print("舞蹈动作错误:", str(e))
-    finally:
-        print("舞蹈结束，恢复站立。")
-        stand_pose() # S曲线恢复站姿并解锁
-
+@action_lock
 def stretch():
-    """伸展 (伸懒腰) 动作 - 修复版：增加手动回程过渡，解决回位突变问题"""
-    global stop_run_node, current_pose
-    stop_run_node = 1
-    try:
-        print("执行动作: 伸展 (缓慢)")
-        # 1. 确保在站立姿态
-        if current_pose != 'stand':
-            stand_pose()
-            time.sleep(0.3)
-        
-        stop_run_node = 1 # stand_pose会解锁，重新锁定
-        
-        # 2. 计算目标姿态：前腿前伸并降低，后腿抬高
-        # X_S 是当前重心位置
-        stretch_x = [X_S + 50, X_S + 50, X_S, X_S] # 前腿向前伸 50mm
-        stretch_y = [-95, -95, -115, -115]         # 前腿趴低(-95)，后腿抬高(-115)
-        
-        # 3. 计算伸展时的舵机角度
-        stretch_positions = PA_IK.ik(ma_case, l1, l2,
-                                   stretch_x[0], stretch_x[1], stretch_x[2], stretch_x[3],
-                                   stretch_y[0], stretch_y[1], stretch_y[2], stretch_y[3])
-        
-        # 4. 去程：S曲线过渡到伸展姿态 (放慢速度: steps=40)
-        smooth_transition(stretch_positions, steps=40, delay=0.03, velocity_profile='s-curve')
-        
-        # 5. 保持伸展 (享受触摸)
-        time.sleep(2.0)
-        
-        # --- 修复核心：手动执行回程平滑过渡 ---
-        print("伸展结束，缓慢恢复...")
-        
-        # 计算标准站立位的角度 (假设站立高度为 110)
-        P_G_stand = PA_ATTITUDE.cal_ges(0, 0, l, b, w, X_S, 110)
-        stand_positions = PA_IK.ik(ma_case, l1, l2,
-                                   P_G_stand[0], P_G_stand[1], P_G_stand[2], P_G_stand[3],
-                                   P_G_stand[4], P_G_stand[5], P_G_stand[6], P_G_stand[7])
-
-        # 定义简单的S曲线函数
-        def s_curve(t):
-             return 6*t**5 - 15*t**4 + 10*t**3
-             
-        # 执行回程插值 (从 stretch_positions -> stand_positions)
-        restore_steps = 40 # 步数越多越慢
-        for i in range(restore_steps + 1):
-            ratio = s_curve(i / restore_steps)
-            
-            # 计算当前帧的角度
-            current_pos = []
-            for j in range(8):
-                # 线性插值公式: Start + (End - Start) * ratio
-                val = stretch_positions[j] + (stand_positions[j] - stretch_positions[j]) * ratio
-                current_pos.append(val)
-            
-            # 输出舵机角度
-            servo_output(ma_case, 0, 
-                         current_pos[0], current_pos[1], current_pos[2], current_pos[3],
-                         current_pos[4], current_pos[5], current_pos[6], current_pos[7])
-            time.sleep(0.03) # 控制速度
-            
-        # --- 修复结束 ---
-        
-    except Exception as e:
-        print("伸展动作错误:", str(e))
-    finally:
-        # 7. 最终调用 stand_pose 确保状态变量复位并解锁
+    """伸展 (伸懒腰) 动作"""
+    print("执行动作: 伸展 (缓慢)")
+    # 1. 确保在站立姿态
+    if current_pose != 'stand':
         stand_pose()
+        time.sleep(0.3)
+    
+    # 2. 计算目标姿态：前腿前伸并降低，后腿抬高
+    stretch_x = [X_S + 50, X_S + 50, X_S, X_S]
+    stretch_y = [-95, -95, -115, -115]
+    
+    # 3. 计算伸展时的舵机角度
+    stretch_positions = PA_IK.ik(ma_case, l1, l2,
+                               stretch_x[0], stretch_x[1], stretch_x[2], stretch_x[3],
+                               stretch_y[0], stretch_y[1], stretch_y[2], stretch_y[3])
+    
+    # 4. 去程：S曲线过渡到伸展姿态
+    smooth_transition(stretch_positions, steps=40, delay=0.03, velocity_profile='s-curve')
+    
+    # 5. 保持伸展
+    time.sleep(2.0)
+    
+    # 6. 回程：smooth_transition 现在能自动从 last_servo_positions 过渡回站立位
+    print("伸展结束，缓慢恢复...")
+    P_G_stand = PA_ATTITUDE.cal_ges(0, 0, l, b, w, X_S, 110)
+    stand_positions = PA_IK.ik(ma_case, l1, l2,
+                               P_G_stand[0], P_G_stand[1], P_G_stand[2], P_G_stand[3],
+                               P_G_stand[4], P_G_stand[5], P_G_stand[6], P_G_stand[7])
+    smooth_transition(stand_positions, steps=40, delay=0.03, velocity_profile='s-curve')
         
         
+@action_lock
 def push_up():
     """俯卧撑动作：S曲线过渡"""
-    global stop_run_node
-    stop_run_node = 1
-    try:
-        print("执行动作: 俯卧撑")
-        push_up_cycles = 3
-        
-        # 1. S曲线过渡到趴下姿态
-        lie_pose()
-        stop_run_node = 1 # lie_pose 会解锁，重新锁定
+    print("执行动作: 俯卧撑")
+    push_up_cycles = 3
+    
+    # 1. S曲线过渡到趴下姿态
+    lie_pose()
+    time.sleep(0.3)
+    
+    # 2. 定义低位和高位
+    P_G_low = PA_ATTITUDE.cal_ges(0, 0, l, b, w, X_S, 90)
+    low_positions = PA_IK.ik(ma_case, l1, l2,
+                             P_G_low[0], P_G_low[1], P_G_low[2], P_G_low[3],
+                             P_G_low[4], P_G_low[5], P_G_low[6], P_G_low[7])
+    
+    P_G_high = PA_ATTITUDE.cal_ges(0, 0, l, b, w, X_S, 110)
+    high_positions = PA_IK.ik(ma_case, l1, l2,
+                              P_G_high[0], P_G_high[1], P_G_high[2], P_G_high[3],
+                              P_G_high[4], P_G_high[5], P_G_high[6], P_G_high[7])
+                              
+    # 3. 循环执行俯卧撑
+    for _ in range(push_up_cycles):
+        smooth_transition(high_positions, steps=15, delay=0.025, velocity_profile='s-curve')
         time.sleep(0.3)
-        
-        # 2. 定义低位和高位
-        # 低位 (趴下)
-        P_G_low = PA_ATTITUDE.cal_ges(0, 0, l, b, w, X_S, 90)
-        low_positions = PA_IK.ik(ma_case, l1, l2,
-                                 P_G_low[0], P_G_low[1], P_G_low[2], P_G_low[3],
-                                 P_G_low[4], P_G_low[5], P_G_low[6], P_G_low[7])
-        
-        # 高位 (撑起)
-        P_G_high = PA_ATTITUDE.cal_ges(0, 0, l, b, w, X_S, 110)
-        high_positions = PA_IK.ik(ma_case, l1, l2,
-                                  P_G_high[0], P_G_high[1], P_G_high[2], P_G_high[3],
-                                  P_G_high[4], P_G_high[5], P_G_high[6], P_G_high[7])
-                                  
-        # 3. 循环执行俯卧撑
-        for _ in range(push_up_cycles):
-            # S曲线撑起
-            smooth_transition(high_positions, steps=15, delay=0.025, velocity_profile='s-curve')
-            time.sleep(0.3)
-            # S曲线趴下
-            smooth_transition(low_positions, steps=15, delay=0.025, velocity_profile='s-curve')
-            time.sleep(0.3)
-            
-    except Exception as e:
-        print("俯卧撑动作错误:", str(e))
-    finally:
-        # 4. S曲线恢复站立
-        print("俯卧撑结束，恢复站立。")
-        stand_pose() # 恢复站姿并解锁
+        smooth_transition(low_positions, steps=15, delay=0.025, velocity_profile='s-curve')
+        time.sleep(0.3)
+    
+    print("俯卧撑结束，恢复站立。")
 
+@action_lock
 def shake_body():
     """摇晃身体 (优化版)：适配高摩擦力和高重心"""
-    global stop_run_node
-    stop_run_node = 1
-    try:
-        print("执行动作: 摇晃身体 (防侧翻)")
-        # 1. 先站稳
-        stand_pose()
-        stop_run_node = 1
-        time.sleep(0.3)
-        
-        # --- 参数调整 ---
-        shake_cycles = 4
-        steps_per_cycle = 60 # 大幅增加步数 (原20 -> 60)，让动作变慢
-        delay = 0.025        # 增加延迟
-        max_roll = 8         # 大幅减小角度 (原15 -> 8)，防止头重脚轻侧翻
-        # ----------------
-        
-        for _ in range(shake_cycles):
-            for step in range(steps_per_cycle):
-                phase = step * 2 * pi / steps_per_cycle
-                # 计算当前的侧倾角
-                current_roll = max_roll * sin(phase)
-                
-                # 计算姿态
-                P_G = PA_ATTITUDE.cal_ges(0, current_roll, l, b, w, X_S, R_H)
-                
-                # 逆解算
-                positions = PA_IK.ik(ma_case, l1, l2,
-                                   P_G[0], P_G[1], P_G[2], P_G[3],
-                                   P_G[4], P_G[5], P_G[6], P_G[7])
-                
-                # 输出
-                servo_output(ma_case, 0, 
-                           positions[0], positions[1], positions[2], positions[3],
-                           positions[4], positions[5], positions[6], positions[7])
-                
-                time.sleep(delay)
-                
-    except Exception as e:
-        print("摇晃身体动作错误:", str(e))
-    finally:
-        print("摇晃结束，恢复站立。")
-        stand_pose()
+    print("执行动作: 摇晃身体 (防侧翻)")
+    # 1. 先站稳
+    stand_pose()
+    time.sleep(0.3)
+    
+    # --- 参数调整 ---
+    shake_cycles = 4
+    steps_per_cycle = 60
+    delay = 0.025
+    max_roll = 8
+    # ----------------
+    
+    for _ in range(shake_cycles):
+        for step in range(steps_per_cycle):
+            phase = step * 2 * pi / steps_per_cycle
+            current_roll = max_roll * sin(phase)
+            P_G = PA_ATTITUDE.cal_ges(0, current_roll, l, b, w, X_S, R_H)
+            positions = PA_IK.ik(ma_case, l1, l2,
+                               P_G[0], P_G[1], P_G[2], P_G[3],
+                               P_G[4], P_G[5], P_G[6], P_G[7])
+            servo_output(ma_case, 0, 
+                       positions[0], positions[1], positions[2], positions[3],
+                       positions[4], positions[5], positions[6], positions[7])
+            time.sleep(delay)
+    
+    print("摇晃结束，恢复站立。")
 
 #======V1.4 动作函数结束======
 
