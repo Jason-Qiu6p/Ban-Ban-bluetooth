@@ -983,4 +983,4 @@ def mainloop():
     IK_ERROR=1
     print("Mainloop IK Error")
 print("伴伴智宠 - Ban-Ban Dog")
-print("版本：V2.0")
+print("版本：V2.1")
